@@ -81,22 +81,41 @@ export function shouldIntervene(state, now) {
 }
 
 /**
+ * Interventions that change the music. When focus drops, the bandit picks
+ * among these, so the extension learns which one works for this user.
+ */
+export const MUSIC_ARMS = [
+  INTERVENTIONS.BOOST_ENERGY,
+  INTERVENTIONS.SWITCH_PLAYLIST,
+  INTERVENTIONS.PATTERN_BREAK,
+  INTERVENTIONS.SMART_RECOMMEND,
+];
+
+/**
  * UCB1 algorithm for selecting intervention arm
  * Balances exploitation (what worked) with exploration (trying new things)
+ *
+ * `only`, when given, limits the choice to those arm names.
  */
-export function selectArmUCB(policy, excludeNuclear = true) {
-  const arms = Object.entries(policy.arms);
+export function selectArmUCB(policy, excludeNuclear = true, only = null) {
+  const arms = Object.entries(policy.arms).filter(([name]) => {
+    if (excludeNuclear && name === 'NUCLEAR') return false;
+    return !only || only.includes(name);
+  });
+  // Count pulls across the arms actually in play, so excluded arms
+  // don't inflate the exploration bonus.
   const totalN = arms.reduce((sum, [_, arm]) => sum + arm.n, 0);
 
   let best = null;
   let bestScore = -Infinity;
 
   for (const [name, arm] of arms) {
-    // Skip nuclear unless explicitly allowed
-    if (excludeNuclear && name === 'NUCLEAR') continue;
+    // An arm that has never been tried goes first. Without this guard,
+    // n = 0 gives 0/0 = NaN, which loses every comparison forever.
+    if (arm.n === 0) return name;
 
     // UCB1 formula: value + exploration bonus
-    const explorationBonus = Math.sqrt((2 * Math.log(totalN + 1)) / arm.n);
+    const explorationBonus = Math.sqrt((2 * Math.log(totalN)) / arm.n);
     const ucbScore = arm.value + explorationBonus;
 
     if (ucbScore > bestScore) {
@@ -112,12 +131,12 @@ export function selectArmUCB(policy, excludeNuclear = true) {
  * Select intervention based on context
  * Escalates if previous interventions didn't work
  */
-export function selectIntervention(state, isDoomscrolling) {
+export function selectIntervention(state, isDoomscrolling, now = Date.now()) {
   const { session, policy, settings, lastIntervention, signals } = state;
 
   // Check if we're escalating (previous intervention didn't help)
   const isEscalating = lastIntervention &&
-    (Date.now() - lastIntervention.appliedAt < 60000) && // Within last minute
+    (now - lastIntervention.appliedAt < 60000) && // Within last minute
     lastIntervention.type !== INTERVENTIONS.VIOLA_POPUP &&
     lastIntervention.type !== INTERVENTIONS.NUCLEAR;
 
@@ -134,7 +153,7 @@ export function selectIntervention(state, isDoomscrolling) {
   if (onUnproductiveSite && state.metrics.focusScore < 60) {
     // Don't spam - check if we showed popup recently
     const recentPopup = lastIntervention?.type === INTERVENTIONS.VIOLA_POPUP &&
-      (Date.now() - lastIntervention.appliedAt < 120000); // 2 min cooldown for popup
+      (now - lastIntervention.appliedAt < 120000); // 2 min cooldown for popup
 
     if (!recentPopup) {
       console.log(`[Decision] Viola popup: on ${signals?.currentCategory} site, focus ${state.metrics.focusScore}`);
@@ -157,9 +176,12 @@ export function selectIntervention(state, isDoomscrolling) {
   const autoThreshold = settings.autoMusicThreshold || 70; // Higher = more sensitive
 
   if (autoMusicEnabled && state.metrics.focusScore < autoThreshold) {
-    // Always use smart recommend when focus drops - music helps refocus
-    console.log(`[Decision] Auto music switch: focus ${state.metrics.focusScore} < threshold ${autoThreshold}`);
-    return INTERVENTIONS.SMART_RECOMMEND;
+    // Music helps refocus. Let the bandit pick which music change to make:
+    // smart recommend starts with the best prior, so it is tried first, but
+    // if it stops helping this user the other arms take over.
+    const arm = selectArmUCB(policy, true, MUSIC_ARMS);
+    console.log(`[Decision] Auto music switch: focus ${state.metrics.focusScore} < threshold ${autoThreshold} -> ${arm}`);
+    return arm;
   }
 
   // Otherwise use bandit to select best intervention
@@ -185,6 +207,8 @@ export function getEscalationLevel(state) {
  */
 export function updateBanditArm(policy, armName, reward) {
   const arm = policy.arms[armName];
+  // Interventions the bandit doesn't choose between (popup, white noise)
+  // have no arm, so there is nothing to learn from them.
   if (!arm) return policy;
 
   // Incremental mean: new_mean = old_mean + (reward - old_mean) / n

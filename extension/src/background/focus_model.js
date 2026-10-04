@@ -55,9 +55,10 @@ export function pruneTimestamps(arr, now) {
 /**
  * Compute focus score from all signals
  * Returns 0-100 where 100 = fully focused
+ *
+ * `now` defaults to the current time; tests pass a fixed value.
  */
-export function computeFocusScore(signals, settings, mode = 'normal') {
-  const now = Date.now();
+export function computeFocusScore(signals, settings, mode = 'normal', now = Date.now()) {
   const config = MODE_CONFIG[mode] || MODE_CONFIG.normal;
 
   let score = config.baseScore;

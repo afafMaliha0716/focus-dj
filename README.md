@@ -1,140 +1,123 @@
-# Lock In DJ
+# FocusDJ
 
-> Real-time focus detection with adaptive music intervention
+**A Chrome extension that notices when you lose focus while studying and
+changes your music to pull you back.**
 
-A Chrome extension that detects when you lose focus while studying and automatically adjusts your music to help you lock in.
+FocusDJ watches for the signs of drifting: tab hopping, doomscrolling, going
+idle, looking away from the screen. It turns them into a live focus score,
+and when the score drops it steps in through YouTube Music, then learns which
+kind of nudge actually works for you.
 
-## Features
-
-- **Focus Detection**: Tracks tab switching, doomscrolling, and idle time to compute a real-time focus score (0-100)
-- **Adaptive Interventions**: Uses a multi-armed bandit algorithm (UCB1) to learn what music changes work best for you
-- **YouTube Music Control**: Injects a controller into your YouTube Music tab to skip tracks, pause, adjust volume
-- **Nuclear Option**: Max volume attention blast when you're caught doomscrolling in strict mode
-- **Privacy First**: All processing happens locally - no data leaves your browser
-
-## Architecture
+## How it works
 
 ```
-[Chrome Extension]
-   ├─ Tab Sensors (switches, URLs, time)
-   ├─ Focus Score Estimator (weighted heuristic)
-   ↓
-[Decision Engine]
-   ├─ UCB1 Bandit for intervention selection
-   ├─ Focus trend tracking (EMA)
-   ↓
-[Music Controller]
-   ├─ Content script injected in music.youtube.com
-   ├─ DOM manipulation for play/pause/next/volume
-   ↓
-[Feedback Loop]
-   ├─ Measure focus improvement after 45s
-   └─ Update intervention arm weights
+Signals                      Focus score            Decision                 Action
+tab switches, site type,  →  0 to 100, updated   →  intervene? which one?  →  YouTube Music
+idle time, scrolling,        every few seconds      (UCB1 bandit)             or a popup
+webcam (optional)
+                                    ↑                                            │
+                                    └────── reward: did focus improve? ──────────┘
 ```
+
+### Focus score
+
+The score starts at 100 and loses points for each sign of distraction
+(`extension/src/background/focus_model.js`):
+
+| Signal | Effect |
+|--------|--------|
+| Tab switching in the last minute | Up to 35 points |
+| Being on a distracting site | Scaled by category: social media, games, entertainment |
+| Scrolling a distracting site | Doomscroll penalty, up to 25 points |
+| Long stretches on distracting sites | Up to 20 points |
+| No mouse or keyboard activity | Up to 20 points after a grace period |
+| Face away from the screen (webcam, opt-in) | Up to 25 points |
+| Productive site, active typing | Small bonuses |
+
+Three modes (gentle, normal, strict) change how quickly penalties build.
+
+### Interventions
+
+| Intervention | What it does |
+|--------------|--------------|
+| Smart recommend | Plays a track picked for your focus history and tempo preferences |
+| Boost energy | Skips to the next track |
+| Pattern break | Pauses briefly, then resumes |
+| Viola popup | A nudge on the page from Viola, the built-in assistant, when you're on a distracting site |
+| Nuclear | Max volume for a few seconds. Strict mode only, and off by default |
+
+### Learning what works
+
+Choosing a music intervention is a multi-armed bandit problem, solved with
+UCB1 (`extension/src/background/decision_engine.js`):
+
+1. Each intervention is an arm with a running average reward.
+2. About 45 seconds after an intervention, FocusDJ measures how much the focus
+   score changed and converts it to a reward between 0 and 1.
+3. UCB1 picks the arm with the best average plus an exploration bonus, so an
+   intervention that keeps failing fades out while rarely tried ones still get
+   a chance.
+
+Over a few sessions the extension settles on what brings you, specifically,
+back on task.
 
 ## Setup
 
-### 1. Load the Extension
+1. Clone this repo.
+2. Open `chrome://extensions`, turn on Developer mode, click **Load unpacked**,
+   and select the `extension` folder.
+3. Open [music.youtube.com](https://music.youtube.com) and start a playlist.
+4. Click the FocusDJ icon, choose a mode, and start a session.
 
-1. Clone this repo
-2. Open Chrome → `chrome://extensions`
-3. Enable "Developer mode" (top right)
-4. Click "Load unpacked" → select the `extension` folder
+Optional: add a [Groq](https://console.groq.com) API key on the options page
+to turn on AI site categorization and track recommendations, and a
+[SerpAPI](https://serpapi.com) key for tempo lookups. Without keys the
+extension uses its built-in site lists and skips to the next track.
 
-### 2. Open YouTube Music
+## Development
 
-1. Go to [music.youtube.com](https://music.youtube.com)
-2. Start playing your focus playlist
-3. The extension will automatically detect the tab
+```bash
+npm test              # unit tests for the focus model and decision engine
 
-### 3. Start a Session
-
-1. Click the extension icon
-2. Choose intensity: Gentle / Normal / Strict
-3. Click "Start Session"
-4. Study!
-
-## How It Works
-
-### Focus Score Calculation
-
-```javascript
-focus_score = 100
-  - 40 * tab_switch_penalty    // 10+ switches/min = max penalty
-  - 45 * off_task_penalty      // time on doomscroll sites
-  - 15 * idle_penalty          // inactivity
-  + 10 * on_task_bonus         // sustained work time
+cd web
+npm install
+npm run dev           # onboarding and settings dashboard
 ```
 
-### Intervention Types
+The tests need only Node 20 or newer; there are no dependencies to install.
 
-| Type | What it does |
-|------|-------------|
-| **Boost Energy** | Skips to next track (up to 3x) |
-| **Switch Playlist** | Skips track (can't switch playlists in YTM easily) |
-| **Pattern Break** | Pauses for 3 seconds, then resumes |
-| **Nuclear** | Max volume for 3 seconds (strict mode + doomscrolling only) |
-
-### UCB1 Bandit Algorithm
-
-The system learns which interventions work for you:
-
-1. After each intervention, wait 45 seconds
-2. Measure focus score change (delta)
-3. Convert to reward: `(delta + 15) / 30` → 0 to 1
-4. Update arm value with incremental mean
-
-Over time, it favors interventions that actually improve your focus.
-
-## File Structure
+## Project structure
 
 ```
 extension/
-├── manifest.json              # Chrome MV3 manifest
-├── src/
-│   ├── background/
-│   │   ├── service_worker.js  # Main brain - orchestrates everything
-│   │   ├── storage.js         # State management
-│   │   ├── focus_model.js     # Focus score computation
-│   │   ├── decision_engine.js # UCB1 bandit + intervention logic
-│   │   └── music_controller.js # Abstracts YTM control
-│   ├── content/
-│   │   └── ytm_controller.js  # Injected into YouTube Music
-│   └── ui/
-│       ├── popup.html/js      # Extension popup
-│       ├── options.html/js    # Settings page
-│       └── styles.css         # Shared styles
+  manifest.json                 Chrome MV3 manifest
+  src/background/
+    service_worker.js           Orchestrates sensing, scoring, and acting
+    focus_model.js              Focus score
+    decision_engine.js          When to intervene and the UCB1 bandit
+    recommendation_engine.js    Track recommendations
+    music_controller.js         Talks to the YouTube Music tab
+    storage.js                  State, settings, site categories
+  src/content/
+    ytm_controller.js           Controls the YouTube Music page
+    activity_tracker.js         Mouse, keyboard, and scroll activity
+    viola_popup.js              On-page nudge
+  src/ui/                       Popup, options, and camera pages
+web/                            React dashboard for onboarding and settings
+tests/                          Unit tests
 ```
-
-## Team Collaboration
-
-### Suggested Split
-
-- **Person A**: UI (popup + options) + styling
-- **Person B**: YouTube Music controller (content script)
-- **Person C**: Focus model + decision engine + service worker
-
-### Key Integration Points
-
-1. `service_worker.js` calls `music_controller.js` for interventions
-2. `music_controller.js` sends messages to `ytm_controller.js` (content script)
-3. `ytm_controller.js` manipulates YouTube Music DOM
 
 ## Privacy
 
-- ✅ All focus detection happens on-device
-- ✅ No URLs or page content is stored long-term
-- ✅ No external API calls (except YouTube Music DOM)
-- ✅ Learning model stays in `chrome.storage.local`
+- Focus scoring, the bandit, and face detection all run in your browser.
+  Webcam frames are never stored or sent anywhere.
+- Everything FocusDJ learns stays in `chrome.storage.local`.
+- If you add API keys, site hostnames and track titles are sent to Groq and
+  SerpAPI to categorize sites and pick music. Without keys, nothing leaves
+  the browser.
 
-## Future Ideas
+## Team
 
-- [ ] Webcam-based gaze detection (opt-in)
-- [ ] Pomodoro timer integration
-- [ ] Focus score history dashboard
-- [ ] Cross-user learning (aggregated, anonymous)
-- [ ] Support for other music services (Spotify when API is back)
-
-## License
-
-MIT
+Built by [@IshaJ721](https://github.com/IshaJ721) and
+[@afafMaliha0716](https://github.com/afafMaliha0716). This is a fork of
+[IshaJ721/focus-dj](https://github.com/IshaJ721/focus-dj).
